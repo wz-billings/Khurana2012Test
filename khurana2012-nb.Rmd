@@ -1,0 +1,122 @@
+---
+title: "Khurana 2012 data examination"
+author: "Zane Billings"
+date: "7/7/2021"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this notebook, we will scrape the data from the online copy of Khurana et al., 2012 [@Khurana2012] and examine their results, primarily from table 1. First we will load all the necessary libraries.
+
+```{r pkg-opts}
+library(tidyverse)
+library(rvest)
+library(zoo)
+library(janitor)
+library(colorblindr)
+```
+
+Now we can use the `rvest` package to scrape the HTML content from the provided path and extract any tables from the entire block of HTML. Note that the provided path is the DOI link to the paper, which is unlikely to change in the near future.
+
+```{r data scraping}
+# This path is the DOI link to the paper in question.
+pth <- "https://doi.org/10.1093/infdis/jir791"
+raw_content <- rvest::read_html(pth)
+tables <- raw_content %>% rvest::html_table(fill = TRUE)
+dplyr::glimpse(tables[[1]])
+```
+
+Luckily it looks like all of Table 1 is contained in the first identified table object. Sometimes things turn out better than you expect. So we can extract this table and the result is a data frame.
+
+```{r extract table 1}
+table_one <- tables[[1]]
+```
+
+So, now we have the data as a tibble, but it is extremely messy. Part of this is due to the way the data is imported with `rvest`, and part of this is because the table is a bit odd. Fortunately the data is rectangular so we can get the data cleaning done pretty easily.
+
+```{r data cleaning and tidying}
+t1 <- table_one %>%
+  dplyr::mutate(
+    # Fills in group values in a new column with no other info.
+    group = if_else(stringr::str_detect(X1, "^Group"), substr(X1, 7, 7), ""),
+    # Replaces all empty strings with na.
+    across(everything(), ~dplyr::na_if(., "")),
+  ) %>%
+  # Fills down the values in group column, replacing NAs with most recent
+  # non-NA value.
+  tidyr::fill(group, .direction = "down") %>%
+  # Removes all rows with group # in column X1
+  dplyr::filter(stringr::str_detect(X1, "^Group", negate = TRUE)) %>%
+  # Sets first row to column names
+  dplyr::slice(-1) %>%
+  # Assign good column names
+  `colnames<-`(c("id", "age", "gender", "vaccine_dose", "hai_d0", "hai_d21",
+                   "hai_d42", "group")) %>%
+  # Finally some miscellaneous cleaning.
+  dplyr::mutate(
+    elderly = age >= 65,
+    superkey = paste0(group, "_", id)
+  )
+dplyr::glimpse(t1)
+```
+
+Now that the data is in a nice, tidy format, we just need to deal with the HAI data. Since we will be looking at this on a log scale, we will set all titers marked "<4" to have a value of 1. Additionally, the one titer marked "NS" for "no sera" will be set to a true missing value. We also want the HAI values to be numeric.
+
+```{r hai cleaning}
+t1 <- t1 %>% dplyr::mutate(
+  across(starts_with("hai"), ~ifelse(. == "<4", 1, .)),
+  across(starts_with("hai"), ~ifelse(. == "NS", NA, .)),
+  across(starts_with("hai"), as.numeric)
+)
+```
+
+Now we need to use the HAI values to compute the log2 values and the fold change.
+
+```{r fold change calculation}
+t1 <- t1 %>%
+  dplyr::mutate(
+    prevactiter = log2(hai_d0),
+    postvactiter = log2(hai_d21)
+  ) %>%
+  dplyr::mutate(titerincrease = postvactiter - prevactiter)
+```
+
+Now we can make the plot that I actually wanted to make all along.
+
+```{r titer change plot}
+ggplot(t1, aes(x = prevactiter, y = titerincrease, fill = elderly)) +
+  geom_smooth(
+    aes(col = elderly),
+    method = "lm", lty = 2, alpha = 0.5, formula = "y~x"
+  ) +
+  geom_jitter(
+    width = 0.1, height = 0.1, shape = 21, col = "black"
+  ) +
+  cowplot::theme_cowplot() +
+  colorblindr::scale_fill_OkabeIto(
+    name = "Age",
+    labels = c("< 65", ">= 65")
+  ) +
+  colorblindr::scale_color_OkabeIto(
+    name = "Age",
+    labels = c("< 65", ">= 65")
+  ) +
+  labs(
+    x = "pre-vaccination HAI titer",
+    y = "21 day post-vaccination HAI titer"
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 10, 2)
+  ) +
+  theme(legend.position = c(0.85, 0.85))
+```
+
+
+
+
+
+
+
